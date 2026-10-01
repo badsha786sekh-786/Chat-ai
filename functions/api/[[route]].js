@@ -9,22 +9,32 @@ const LANGS = {
 };
 const MAX_MSGS = 60;
 
-const fresh = () => ({ status: 'stopped', topic: '', lang: 'hinglish', messages: [], next: 0, nextAt: 0, lease: 0 });
+const fresh_state = () => ({ status: 'stopped', topic: '', lang: 'hinglish', messages: [], next: 0, nextAt: 0, lease: 0 });
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 
 const basketUrl = (env) => `https://getpantry.cloud/apiv1/pantry/${env.PANTRY_ID}/basket/aichat`;
 
-async function load(env) {
-  const r = await fetch(basketUrl(env), { cf: { cacheTtl: 0 } });
-  if (r.status === 400 || r.status === 404) return fresh();   // basket abhi bana nahi
+let memo = null, memoAt = 0;   // chhota cache: Pantry par bar-bar request na jaye
+async function load(env, fresh = false) {
+  if (!fresh && memo && Date.now() - memoAt < 2500) return structuredClone(memo);
+  let r;
+  for (let i = 0; i < 3; i++) {                       // 429 aaye to thoda ruk ke dobara try
+    r = await fetch(basketUrl(env), { cf: { cacheTtl: 0 } });
+    if (r.status !== 429) break;
+    await new Promise((res) => setTimeout(res, 700 * (i + 1)));
+  }
+  if (r.status === 400 || r.status === 404) return fresh_state();   // basket abhi bana nahi
+  if (r.status === 429 && memo) return structuredClone(memo);       // purana state dikha do
   if (!r.ok) throw new Error(`Pantry error ${r.status}`);
-  return { ...fresh(), ...(await r.json()) };
+  memo = { ...fresh_state(), ...(await r.json()) }; memoAt = Date.now();
+  return structuredClone(memo);
 }
 async function save(env, s) {
   // POST = poora basket replace karta hai (PUT merge karta hai, wo hume nahi chahiye)
   const r = await fetch(basketUrl(env), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(s) });
   if (!r.ok) throw new Error(`Pantry save error ${r.status}`);
+  memo = structuredClone(s); memoAt = Date.now();
 }
 
 async function generate(env, s) {
@@ -61,11 +71,13 @@ async function poll(env) {
   const now = Date.now();
   let error = null;
   if (s.status === 'running' && now >= s.nextAt && now > s.lease) {
+    s = await load(env, true);
+    if (!(s.status === 'running' && Date.now() >= s.nextAt && Date.now() > s.lease)) return { ...view(s, env), error };
     s.lease = now + 20000;                 // "main bana raha hun" — baaki devices ruk jayein
     await save(env, s);
     try {
       const text = await generate(env, s);
-      const latest = await load(env);       // beech mein pause/stop hua to message discard
+      const latest = await load(env, true);       // beech mein pause/stop hua to message discard
       if (latest.status === 'running' && latest.topic === s.topic && latest.messages.length === s.messages.length) {
         latest.messages.push({ id: now + '-' + latest.messages.length, speaker: latest.next, name: NAMES[latest.next], text });
         latest.messages = latest.messages.slice(-MAX_MSGS);
@@ -80,7 +92,7 @@ async function poll(env) {
         s = latest;
       }
     } catch (e) {
-      s = await load(env);
+      s = await load(env, true);
       s.status = 'paused'; s.lease = 0;
       await save(env, s);
       error = e.message;
@@ -91,7 +103,7 @@ async function poll(env) {
 
 async function control(env, body) {
   if (env.ADMIN_PASSWORD && body.password !== env.ADMIN_PASSWORD) return json({ error: 'Galat password' }, 401);
-  const s = await load(env);
+  const s = await load(env, true);
   const { action } = body;
   if (action === 'start') {
     s.topic = (body.topic || '').trim().slice(0, 200) || 'zindagi, technology aur future';
