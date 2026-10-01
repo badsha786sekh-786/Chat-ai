@@ -133,7 +133,7 @@ async function poll() {
   } catch { $('err').textContent = 'Network problem, dobara koshish ho rahi hai…'; }
   busy = false;
 }
-setInterval(poll, 3000); poll();
+setInterval(poll, 5000); poll();
 
 async function ctl(action) {
   $('err').textContent = '';
