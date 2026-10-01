@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI ↔ AI Baatcheet</title>
+<style>
+  :root{--bg:#eef1f5;--ink:#1c2330;--muted:#6b7686;--a:#1f5eff;--b:#e8590c;--card:#fff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Noto Sans Devanagari",sans-serif;display:flex;flex-direction:column;height:100dvh}
+  header{padding:14px 16px 10px;background:var(--card);border-bottom:1px solid #dde3ea}
+  h1{margin:0 0 10px;font-size:18px;font-weight:700}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  input,select{font:inherit;padding:9px 10px;border:1px solid #cdd5df;border-radius:10px;background:#fff;min-width:0}
+  #topic{flex:1 1 180px}
+  button{font:inherit;font-weight:600;padding:9px 14px;border:0;border-radius:10px;cursor:pointer;background:var(--ink);color:#fff}
+  button.alt{background:#e3e8ef;color:var(--ink)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #7aa2ff;outline-offset:2px}
+  #status{margin-top:8px;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  .dot{width:9px;height:9px;border-radius:50%;background:#aab3bf}
+  .running .dot{background:#2fb344;animation:pulse 1.2s infinite}
+  .paused .dot{background:#f0a500}
+  @keyframes pulse{50%{opacity:.3}}
+  @media (prefers-reduced-motion:reduce){.running .dot{animation:none}}
+  #chat{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+  .msg{max-width:82%;padding:10px 14px;border-radius:16px;line-height:1.45;background:var(--card);border-left:5px solid var(--a)}
+  .msg.s1{align-self:flex-end;border-left:0;border-right:5px solid var(--b)}
+  .msg b{display:block;font-size:12px;margin-bottom:2px;color:var(--a)}
+  .msg.s1 b{color:var(--b);text-align:right}
+  .msg.speaking{box-shadow:0 0 0 2px #1c2330}
+  .empty{margin:auto;color:var(--muted);text-align:center;max-width:280px}
+  #err{color:#c92a2a;font-size:13px;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Aria ↔ Veer: do AI ki baatcheet</h1>
+  <div class="row">
+    <input id="topic" placeholder="Topic likho (jaise: chai vs coffee)">
+    <select id="lang"><option value="hinglish">Hinglish</option><option value="hindi">हिंदी</option><option value="english">English</option></select>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="start">Shuru</button>
+    <button id="pause" class="alt">Pause</button>
+    <button id="resume" class="alt">Resume</button>
+    <button id="stop" class="alt">Band</button>
+    <button id="voice" class="alt">Awaaz: Off</button>
+    <input id="pw" type="password" placeholder="Password" style="display:none;width:110px">
+  </div>
+  <div id="status"><span class="dot"></span><span id="stxt">Connecting…</span></div>
+  <div id="err"></div>
+</header>
+<div id="chat"><div class="empty">Topic likho aur “Shuru” dabao. Sab devices par yehi chat live dikhegi.</div></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const chat = $('chat');
+const EMPTY = '<div class="empty">Topic likho aur “Shuru” dabao. Sab devices par yehi chat live dikhegi.</div>';
+let voiceOn = false, state = { status: 'stopped', messages: [], lang: 'hinglish' }, shown = [], first = true;
+let speakQ = [], speaking = false, busy = false;
+const spokenLang = { hinglish: 'hi-IN', hindi: 'hi-IN', english: 'en-US' };
+
+function addMsg(m, speak) {
+  chat.querySelector('.empty')?.remove();
+  const d = document.createElement('div');
+  d.className = 'msg s' + m.speaker; d.dataset.id = m.id;
+  d.innerHTML = '<b></b><span></span>';
+  d.firstChild.textContent = m.name; d.lastChild.textContent = m.text;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+  shown.push(m.id);
+  if (speak && voiceOn) { speakQ.push(m); pump(); }
+}
+
+function pickVoice(lang, speaker) {
+  const vs = speechSynthesis.getVoices().filter(v => v.lang.replace('_','-').toLowerCase().startsWith(lang.slice(0,2)));
+  if (!vs.length) return null;
+  const exact = vs.filter(v => v.lang.replace('_','-').toLowerCase() === lang.toLowerCase());
+  const pool = exact.length ? exact : vs;
+  return pool[speaker % pool.length];
+}
+function pump() {
+  if (speaking || !speakQ.length || !voiceOn) return;
+  const m = speakQ.shift();
+  const u = new SpeechSynthesisUtterance(m.text);
+  const lang = spokenLang[state.lang] || 'hi-IN';
+  u.lang = lang;
+  const v = pickVoice(lang, m.speaker); if (v) u.voice = v;
+  u.pitch = m.speaker === 0 ? 1.25 : 0.8;
+  const el = chat.querySelector(`[data-id="${m.id}"]`);
+  speaking = true; el?.classList.add('speaking');
+  const done = () => { speaking = false; el?.classList.remove('speaking'); pump(); };
+  u.onend = done; u.onerror = done;
+  speechSynthesis.speak(u);
+}
+
+function apply(s) {
+  const prevStatus = state.status;
+  state = s;
+  // naye messages: agar pichla dikhaya hua last message list mein mila to sirf uske baad wale jodo, warna chat dobara banao
+  const ids = s.messages.map(m => m.id);
+  const lastShown = shown[shown.length - 1];
+  const idx = lastShown ? ids.indexOf(lastShown) : -1;
+  if (lastShown && idx === -1) {
+    chat.innerHTML = ''; shown = [];
+    s.messages.forEach(m => addMsg(m, false));
+  } else {
+    s.messages.slice(idx + 1).forEach(m => addMsg(m, !first));
+  }
+  if (!s.messages.length && !chat.children.length) chat.innerHTML = EMPTY;
+  if (!s.messages.length && shown.length) { chat.innerHTML = EMPTY; shown = []; }
+  first = false;
+
+  const st = s.status;
+  $('pause').disabled = st !== 'running';
+  $('resume').disabled = st !== 'paused';
+  $('stop').disabled = st === 'stopped';
+  $('stxt').textContent = { running: 'Baatcheet chal rahi hai', paused: 'Pause hai', stopped: 'Ruki hui hai' }[st];
+  $('status').className = st;
+  $('pw').style.display = s.locked ? '' : 'none';
+  if (s.topic && document.activeElement !== $('topic')) $('topic').value = s.topic;
+  if (document.activeElement !== $('lang')) $('lang').value = s.lang;
+  if (st !== 'running' && prevStatus === 'running') { speakQ = []; speechSynthesis.cancel(); speaking = false; }
+  if (s.error) $('err').textContent = s.error;
+}
+
+async function poll() {
+  if (busy) return; busy = true;
+  try {
+    const r = await fetch('/api/poll', { method: 'POST' });
+    const s = await r.json();
+    if (!r.ok) $('err').textContent = s.error || 'Error'; else { if (!s.error) $('err').textContent = ''; apply(s); }
+  } catch { $('err').textContent = 'Network problem, dobara koshish ho rahi hai…'; }
+  busy = false;
+}
+setInterval(poll, 3000); poll();
+
+async function ctl(action) {
+  $('err').textContent = '';
+  const r = await fetch('/api/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, topic: $('topic').value, lang: $('lang').value, password: $('pw').value }) });
+  const s = await r.json();
+  if (!r.ok) { $('err').textContent = s.error; return; }
+  apply(s); poll();
+}
+$('start').onclick = () => ctl('start');
+$('pause').onclick = () => ctl('pause');
+$('resume').onclick = () => ctl('resume');
+$('stop').onclick = () => ctl('stop');
+$('voice').onclick = () => {
+  voiceOn = !voiceOn;
+  $('voice').textContent = 'Awaaz: ' + (voiceOn ? 'On' : 'Off');
+  if (!voiceOn) { speechSynthesis.cancel(); speakQ = []; speaking = false; }
+  else speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+};
+</script>
+</body>
+</html>
