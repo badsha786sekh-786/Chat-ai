@@ -48,6 +48,17 @@ export class ChatRoom extends DurableObject {
       } else if (action === 'stop') {
         s.status = 'stopped'; s.gen++; s.error = null;
         await this.ctx.storage.deleteAlarm();
+      } else if (action === 'say' && s.status !== 'stopped') {
+        const text = String(body.text || '').trim().slice(0, 300);
+        if (text) {
+          const name = String(body.name || '').trim().slice(0, 20) || 'Insaan';
+          s.messages.push({ id: Date.now() + '-' + s.messages.length, speaker: 2, name, text });
+          s.messages = s.messages.slice(-MAX_MSGS);
+          if (s.status === 'running') {            // AI turant is insaan ko jawab de
+            s.gen++;
+            await this.ctx.storage.setAlarm(Date.now() + 50);
+          }
+        }
       }
       await this.save();
       return json(this.view(s));
@@ -82,8 +93,9 @@ export class ChatRoom extends DurableObject {
     const system =
       `Tum ${me} ho, ek AI. Tum ${other} (ek aur AI) se baat kar rahe ho. Topic: "${s.topic}". ` +
       `Bhasha: ${LANGS[s.lang]}. Sirf 1-2 chhote sentences bolo, natural bolchal ki tarah. ` +
-      `Sirf apna dialogue likho, naam ya prefix mat likho. Har baar kuch naya jodo: raay, sawal ya example. Baat ko dohrao mat.`;
-    const history = s.messages.slice(-16).map((m) => ({ role: m.speaker === s.next ? 'assistant' : 'user', content: m.text }));
+      `Sirf apna dialogue likho, naam ya prefix mat likho. Har baar kuch naya jodo: raay, sawal ya example. Baat ko dohrao mat. ` +
+      `Beech mein koi insaan bhi apna message likh sakta hai (uske naam ke saath aayega). Aisa ho to pehle us insaan ko seedha jawab do, phir baat aage badhao.`;
+    const history = s.messages.slice(-16).map((m) => ({ role: m.speaker === s.next ? 'assistant' : 'user', content: m.speaker === 2 ? `${m.name} (insaan): ${m.text}` : m.text }));
     if (!history.length || history[history.length - 1].role === 'assistant') {
       history.push({ role: 'user', content: history.length ? 'Aage badho.' : `Baat shuru karo topic par: ${s.topic}` });
     }
