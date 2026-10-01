@@ -81,9 +81,13 @@ export class ChatRoom extends DurableObject {
       await this.ctx.storage.setAlarm(Date.now() + Math.min(20000, 2000 + text.length * 70));
     } catch (e) {
       if (s.status !== 'running' || s.gen !== gen) return;
-      s.fails++; s.error = e.message;
-      if (s.fails >= 5) s.status = 'paused';                  // 5 baar lagatar fail: ruk jao
-      else await this.ctx.storage.setAlarm(Date.now() + 20000); // warna 20 sec baad dobara try
+      s.error = e.retryMs ? `Groq limit lagi hai, ${Math.ceil(e.retryMs / 1000)} sec baad dobara koshish hogi. ` + e.message : e.message;
+      if (e.retryMs) await this.ctx.storage.setAlarm(Date.now() + e.retryMs);   // limit: intezaar, band nahi
+      else {
+        s.fails++;
+        if (s.fails >= 5) s.status = 'paused';                    // 5 baar lagatar fail: ruk jao
+        else await this.ctx.storage.setAlarm(Date.now() + 20000);
+      }
       await this.save();
     }
   }
@@ -110,30 +114,58 @@ export class ChatRoom extends DurableObject {
         ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : {}),
       }),
     });
-    let model = this.model || this.env.GROQ_MODEL || (await this.pickModel());
-    let r = await call(model);
-    if (r.status === 404) {                 // model nahi mila: account ke available models se khud chuno
-      this.model = null;
-      model = await this.pickModel();
-      r = await call(model);
+
+    // Har model ki alag limit hoti hai: ek ki limit lage to agle model par chale jao
+    const models = await this.getModels();
+    this.cool = this.cool || {};
+    let lastErr = '', soonest = Infinity;
+    for (const model of models) {
+      const until = this.cool[model] || 0;
+      if (Date.now() < until) { soonest = Math.min(soonest, until); continue; }
+      const r = await call(model);
+      if (r.ok) {
+        const text = ((await r.json()).choices[0].message.content || '').trim();
+        if (text) return text;
+        lastErr = `${model}: khali jawab`;
+        continue;
+      }
+      const body = (await r.text()).slice(0, 220);
+      lastErr = `Groq ${r.status} (${model}): ${body}`;
+      if (r.status === 429) {
+        const ms = this.retryMs(body);
+        this.cool[model] = Date.now() + ms; soonest = Math.min(soonest, Date.now() + ms);
+      } else if (r.status === 404 || r.status === 400) {
+        this.cool[model] = Date.now() + 3600000;                 // is model ko 1 ghante ke liye chhod do
+      } else {
+        throw new Error(lastErr);                                // key galat etc.
+      }
     }
-    if (!r.ok) throw new Error(`Groq error ${r.status}: ${(await r.text()).slice(0, 150)}`);
-    this.model = model;
-    const text = ((await r.json()).choices[0].message.content || '').trim();
-    if (!text) throw new Error('Groq ne khali jawab diya');
-    return text;
+    const err = new Error(lastErr || 'Koi model available nahi');
+    if (soonest < Infinity) err.retryMs = Math.max(20000, Math.min(soonest - Date.now(), 600000));
+    throw err;
   }
 
-  // Aapki Groq key par jo chat models available hain unme se sabse achha chunta hai
-  async pickModel() {
+  // Groq ke error text se "try again in 5m30s" nikalta hai
+  retryMs(text) {
+    const m = /try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/i.exec(text);
+    if (!m) return 5 * 60000;
+    const ms = ((+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0)) * 1000;
+    return Math.min(Math.max(ms + 2000, 10000), 24 * 3600000);
+  }
+
+  // Aapki key par jo chat models available hain, sabse achhe pehle
+  async getModels() {
+    if (this.models && Date.now() - this.modelsAt < 3600000) return this.models;
     const r = await fetch('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${this.env.GROQ_API_KEY}` } });
     if (!r.ok) throw new Error(`Groq models list error ${r.status} (API key check karo)`);
     const ids = (await r.json()).data.map((m) => m.id);
-    const chat = ids.filter((id) => !/whisper|tts|guard|embed|compound|orpheus|playai/i.test(id));
-    const prefer = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'openai/gpt-oss-120b'];
-    const pick = prefer.find((p) => chat.includes(p)) || chat[0];
-    if (!pick) throw new Error('Is key par koi chat model nahi mila. Available: ' + (ids.join(', ') || 'koi nahi'));
-    return pick;
+    const chat = ids.filter((id) => !/whisper|tts|guard|embed|compound|orpheus|playai|safeguard|prompt/i.test(id));
+    const prefer = [this.env.GROQ_MODEL, 'llama-3.1-8b-instant', 'llama-3.3-70b-versatile', 'meta-llama/llama-4-scout-17b-16e-instruct',
+      'openai/gpt-oss-20b', 'openai/gpt-oss-120b', 'qwen/qwen3-32b'].filter(Boolean);
+    const ordered = [...prefer.filter((p) => chat.includes(p)), ...chat.filter((c) => !prefer.includes(c))];
+    if (!ordered.length) throw new Error('Is key par koi chat model nahi mila. Available: ' + (ids.join(', ') || 'koi nahi'));
+    this.models = ordered; this.modelsAt = Date.now();
+    return ordered;
   }
 }
 
