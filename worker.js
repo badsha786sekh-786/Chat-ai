@@ -87,18 +87,41 @@ export class ChatRoom extends DurableObject {
     if (!history.length || history[history.length - 1].role === 'assistant') {
       history.push({ role: 'user', content: history.length ? 'Aage badho.' : `Baat shuru karo topic par: ${s.topic}` });
     }
-    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const call = (model) => fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.env.GROQ_API_KEY}` },
       body: JSON.stringify({
-        model: this.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+        model,
         messages: [{ role: 'system', content: system }, ...history],
         temperature: 0.9,
-        max_tokens: 120,
+        max_tokens: /gpt-oss/.test(model) ? 400 : 120,
+        ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : {}),
       }),
     });
+    let model = this.model || this.env.GROQ_MODEL || (await this.pickModel());
+    let r = await call(model);
+    if (r.status === 404) {                 // model nahi mila: account ke available models se khud chuno
+      this.model = null;
+      model = await this.pickModel();
+      r = await call(model);
+    }
     if (!r.ok) throw new Error(`Groq error ${r.status}: ${(await r.text()).slice(0, 150)}`);
-    return (await r.json()).choices[0].message.content.trim();
+    this.model = model;
+    const text = ((await r.json()).choices[0].message.content || '').trim();
+    if (!text) throw new Error('Groq ne khali jawab diya');
+    return text;
+  }
+
+  // Aapki Groq key par jo chat models available hain unme se sabse achha chunta hai
+  async pickModel() {
+    const r = await fetch('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${this.env.GROQ_API_KEY}` } });
+    if (!r.ok) throw new Error(`Groq models list error ${r.status} (API key check karo)`);
+    const ids = (await r.json()).data.map((m) => m.id);
+    const chat = ids.filter((id) => !/whisper|tts|guard|embed|compound|orpheus|playai/i.test(id));
+    const prefer = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'openai/gpt-oss-120b'];
+    const pick = prefer.find((p) => chat.includes(p)) || chat[0];
+    if (!pick) throw new Error('Is key par koi chat model nahi mila. Available: ' + (ids.join(', ') || 'koi nahi'));
+    return pick;
   }
 }
 
